@@ -21,6 +21,13 @@ class ProjectController extends Controller
                 'leader:id,name,email',
                 'members:id,name,email',
             ])
+            // Count total tasks
+            ->withCount('tasks as total_tasks')
+            // Count only completed tasks
+            ->withCount(['tasks as completed_tasks' => function ($query) {
+                $query->where('status', 'completed');
+            }])
+            // Only projects user leads or is a member of
             ->where('leader_id', $userId)
             ->orWhereHas('members', function ($query) use ($userId) {
                 $query->where('users.id', $userId);
@@ -77,13 +84,34 @@ class ProjectController extends Controller
      */
     public function show(Project $project)
     {
+        $userId = auth()->guard()->id();
+
         $project->load([
             'members:id,name,email',
-            'leader:id,name,email'
+            'leader:id,name,email',
+            'tasks' => function ($query) {
+                $query->select('id', 'title', 'description', 'status', 'created_at', 'user_id', 'project_id')
+                    ->with('user:id,name,email'); // nested relationship
+            },
+        ])
+        // Add counts like in index()
+        ->loadCount([
+            'tasks as total_tasks',
+            'tasks as completed_tasks' => function ($query) {
+                $query->where('status', 'completed');
+            }
         ]);
+
+        $memberIds = $project->members->pluck('id')->toArray();
+
+        $availableUsers = User::whereNotIn('id', array_merge([$userId], $memberIds))
+            ->select('id', 'name', 'email')
+            ->get();
 
         return Inertia::render('projects/Show', [
             'project' => $project,
+            'currentUserId' => $userId,
+            'availableUsers' => $availableUsers,
         ]);
     }
 
@@ -100,7 +128,29 @@ class ProjectController extends Controller
      */
     public function update(Request $request, Project $project)
     {
-        //
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'price' => 'required|numeric|min:0',
+            'end_date' => 'required|date',
+            'member_ids' => 'array',
+            'member_ids.*' => 'integer|exists:users,id',
+        ]);
+
+        // Update project data
+        $project->update([
+            'name' => $validated['name'],
+            'description' => $validated['description'] ?? null,
+            'price' => $validated['price'],
+            'end_date' => $validated['end_date'],
+        ]);
+
+        // Sync members
+        if (isset($validated['member_ids'])) {
+            $project->members()->sync($validated['member_ids']);
+        }
+
+        return back()->with('success', 'Project updated successfully.'); // Inertia handles the refresh
     }
 
     /**
